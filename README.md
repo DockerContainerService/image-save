@@ -16,6 +16,7 @@
 ## Features
 * Support save docker image to local independent of docker daemon
 * Support for reading registry passwords in environment variables ``REGISTRY_PASSWORD``
+* Supports multithreading layer download
 
 ## Usage
 ### Install image-save
@@ -42,7 +43,7 @@ Flags:
   -d, --debug           Enable debug mode
   -h, --help            help for imsave
   -i, --insecure        Whether the registry is using http
-      --os string       The os of the image you want to save
+      --os string       The osFilter of the image you want to save
   -o, --output string   Output file
   -p, --passwd string   Password of the registry
   -u, --user string     Username of the registry
@@ -50,11 +51,11 @@ Flags:
 ```
 ### Usage example
 ```bash
-[root@tencent ~]# ./imsave busybox --arch=amd64
-[2023-03-30 17:39:40]  INFO Using default tag: latest
-[2023-03-30 17:39:43]  INFO Using architecture: amd64
-[1/1] 4b35f584bb4f: [>>>>>>>>>>>>>>>>>>>>] 2.6 MB/2.6 MB
-[2023-03-30 17:39:50]  INFO Output file: library_busybox_latest.tgz
+[root@tencent ~]# ./imsave alpine
+Using default tag: latest
+Using architecture: amd64
+[f56be85fc22e]  ... done! [3.37MB in 2.913s; 1.13MB/s]
+Output file: alpine_latest.tgz
 ```
 
 ## Star History
