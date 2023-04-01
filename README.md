@@ -16,7 +16,8 @@
 ## Features
 * Support save docker image to local independent of docker daemon
 * Support for reading registry passwords in environment variables ``REGISTRY_PASSWORD``
-* Supports multithreading layer download
+* Support multithreading layer download
+* Support the use of registry mirror
 
 ## Usage
 ### Install image-save

@@ -18,7 +18,7 @@ type repoUrl struct {
 	insecure bool
 }
 
-func parseRepoUrl(url string) (*repoUrl, error) {
+func parseRepoUrl(url, mirror string) (*repoUrl, error) {
 	// split to registry/namespace/repoAndTag
 	slice := strings.SplitN(url, "/", 3)
 
@@ -60,7 +60,7 @@ func parseRepoUrl(url string) (*repoUrl, error) {
 
 		return &repoUrl{
 			url:       url,
-			registry:  "registry.hub.docker.com",
+			registry:  mirror,
 			namespace: slice[0],
 			project:   repo,
 			tag:       tag,
@@ -68,7 +68,7 @@ func parseRepoUrl(url string) (*repoUrl, error) {
 	} else {
 		return &repoUrl{
 			url:       url,
-			registry:  "registry.hub.docker.com",
+			registry:  mirror,
 			namespace: "library",
 			project:   repo,
 			tag:       tag,

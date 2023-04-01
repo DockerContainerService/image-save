@@ -30,8 +30,8 @@ type Client struct {
 	repo *repoUrl
 }
 
-func NewClient(sourceUrl, username, password string, insecure bool) *Client {
-	repo, err := parseRepoUrl(sourceUrl)
+func NewClient(sourceUrl, username, password, mirror string, insecure bool) *Client {
+	repo, err := parseRepoUrl(sourceUrl, mirror)
 	if err != nil {
 		logrus.Fatalf("parse repo url[%s] error: %+v", sourceUrl, err)
 	}
