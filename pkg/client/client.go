@@ -10,11 +10,13 @@ import (
 	"github.com/containers/image/v5/manifest"
 	"github.com/containers/image/v5/pkg/blobinfocache/none"
 	"github.com/containers/image/v5/types"
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 const passwdEnv = "REGISTRY_PASSWORD"
@@ -238,7 +240,27 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 	parentId := ""
 	var layerDirId string
 
-	for index, layer := range manifestInfoList[0].LayerInfos() {
+	pw := progress.NewWriter()
+	pw.SetAutoStop(true)
+	pw.SetTrackerLength(25)
+	pw.SetMessageWidth(15)
+	pw.SetNumTrackersExpected(len(manifestInfoList[0].LayerInfos()))
+	pw.SetSortBy(progress.SortByPercentDsc)
+	pw.SetStyle(progress.StyleDefault)
+	pw.SetTrackerPosition(progress.PositionRight)
+	pw.SetUpdateFrequency(time.Millisecond * 100)
+	pw.Style().Colors = progress.StyleColorsExample
+	pw.Style().Options.PercentFormat = "%4.1f%%"
+	pw.Style().Visibility.ETA = true
+	pw.Style().Visibility.ETAOverall = false
+	pw.Style().Visibility.Speed = true
+	pw.Style().Visibility.SpeedOverall = false
+	pw.Style().Visibility.TrackerOverall = false
+	pw.Style().Visibility.Pinned = false
+
+	go pw.Render()
+
+	for _, layer := range manifestInfoList[0].LayerInfos() {
 		layerDigest := layer.Digest
 		logrus.Debugf("Digest: %s", layerDigest)
 		layerDirId = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s%s", parentId, layerDigest))))
@@ -250,7 +272,17 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 
 		logrus.Debugf("create layer.tar")
 		blob, size, err = c.source.GetBlob(c.ctx, types.BlobInfo{Digest: layerDigest, URLs: layer.URLs, Size: layer.Size}, none.NoCache)
-		tools.WriteBufferedFile(fmt.Sprintf("%s/layer.tar", layerDir), blob, size, fmt.Sprintf("[%d/%d] %s", index+1, len(manifestInfoList[0].LayerInfos()), string(layerDigest[7:19])))
+		tracker := progress.Tracker{
+			Message: fmt.Sprintf("[%s]", string(layerDigest[7:19])),
+			Total:   size,
+			Units:   progress.UnitsBytes,
+		}
+
+		pw.AppendTracker(&tracker)
+
+		go func() {
+			tools.WriteBufferedFile(fmt.Sprintf("%s/layer.tar", layerDir), blob, size, &tracker)
+		}()
 
 		manifestJson[0].Layers = append(manifestJson[0].Layers, fmt.Sprintf("%s/layer.tar", layerDirId))
 
@@ -279,6 +311,11 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 			logrus.Fatalf("create json file error-3: %+v", err)
 		}
 		tools.WriteFile(fmt.Sprintf("%s/json", layerDir), jsonObjByte)
+	}
+	time.Sleep(time.Second)
+
+	for pw.IsRenderInProgress() {
+		time.Sleep(time.Millisecond * 100)
 	}
 
 	logrus.Debugf("create manifest.json")

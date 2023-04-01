@@ -5,7 +5,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"fmt"
-	"github.com/dustin/go-humanize"
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/sirupsen/logrus"
 	"io"
 	"io/fs"
@@ -15,42 +15,19 @@ import (
 )
 
 type writeCounter struct {
-	total      uint64
-	downloaded uint64
-	msg        string
+	track *progress.Tracker
 }
 
 func (w *writeCounter) Write(p []byte) (int, error) {
 	n := len(p)
-	w.downloaded += uint64(n)
-	w.PrintProgress()
+	w.track.Increment(int64(n))
+	if w.track.Value() >= w.track.Total {
+		w.track.MarkAsDone()
+	}
 	return n, nil
 }
 
-func (w *writeCounter) getProgressBar(length int) (res string) {
-	process := int(w.downloaded) * length / int(w.total)
-	for i := 0; i < length; i++ {
-		if i > process {
-			res += " "
-		} else {
-			res += ">"
-		}
-	}
-	return res
-}
-
-func (w *writeCounter) PrintProgress() {
-	show := ""
-	if w.msg != "" {
-		show = fmt.Sprintf("\r%s: [%s] %s/%s", w.msg, w.getProgressBar(20), humanize.Bytes(w.downloaded), humanize.Bytes(w.total))
-	} else {
-		show = fmt.Sprintf("\rDownloading... [%s] %s/%s", w.getProgressBar(20), humanize.Bytes(w.downloaded), humanize.Bytes(w.total))
-	}
-	fmt.Printf("\r%s", strings.Repeat(" ", 60))
-	fmt.Printf(show)
-}
-
-func WriteBufferedFile(filename string, src io.ReadCloser, size int64, msg string) {
+func WriteBufferedFile(filename string, src io.ReadCloser, size int64, track *progress.Tracker) {
 	defer src.Close()
 	file, err := os.Create(filename)
 	if err != nil {
@@ -60,15 +37,13 @@ func WriteBufferedFile(filename string, src io.ReadCloser, size int64, msg strin
 	defer file.Close()
 
 	wc := &writeCounter{
-		total: uint64(size),
-		msg:   msg,
+		track: track,
 	}
 	_, err = io.Copy(fileWriter, io.TeeReader(src, wc))
 	if err != nil {
 		logrus.Fatalf("write file %s error: %+v", filename, err)
 	}
 	fileWriter.Flush()
-	fmt.Printf("\n")
 }
 
 func WriteFile(filename string, content []byte) {
