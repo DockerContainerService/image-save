@@ -15,6 +15,7 @@
 
 ## Features
 * Support save docker image to local independent of docker daemon
+* Support for reading registry passwords in environment variables ``REGISTRY_PASSWORD``
 
 ## Usage
 ### Install image-save

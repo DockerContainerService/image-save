@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	version, os, arch, username, password, output string
-	debug, insecure                               bool
+	version, osFilter, archFilter, username, password, output string
+	debug, insecure                                           bool
 )
 
 var rootCmd = &cobra.Command{
@@ -25,20 +25,23 @@ var rootCmd = &cobra.Command{
 		}
 
 		c := client.NewClient(args[0], username, password, insecure)
-		var osFilter []string
-		if os == "" {
-			osFilter = []string{}
+		var osFilters []string
+
+		// Avoid empty osFilter
+		if osFilter == "" {
+			osFilters = []string{}
 		} else {
-			osFilter = []string{os}
+			osFilters = []string{osFilter}
 		}
-		c.Save(osFilter, []string{arch}, output)
+
+		c.Save(osFilters, []string{archFilter}, output)
 	},
 }
 
 func init() {
 	rootCmd.SetVersionTemplate("imsave version {{.Version}}\n")
-	rootCmd.PersistentFlags().StringVar(&arch, "arch", runtime.GOARCH, "The architecture of the image you want to save")
-	rootCmd.PersistentFlags().StringVar(&os, "os", "", "The os of the image you want to save")
+	rootCmd.PersistentFlags().StringVar(&archFilter, "arch", runtime.GOARCH, "The architecture of the image you want to save")
+	rootCmd.PersistentFlags().StringVar(&osFilter, "os", "", "The osFilter of the image you want to save")
 	rootCmd.PersistentFlags().StringVarP(&output, "output", "o", "", "Output file")
 	rootCmd.PersistentFlags().StringVarP(&username, "user", "u", "", "Username of the registry")
 	rootCmd.PersistentFlags().StringVarP(&password, "passwd", "p", "", "Password of the registry")

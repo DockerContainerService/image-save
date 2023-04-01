@@ -2,7 +2,6 @@ package client
 
 import (
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"strings"
 )
 
@@ -13,6 +12,10 @@ type repoUrl struct {
 	namespace string
 	project   string
 	tag       string
+
+	username string
+	password string
+	insecure bool
 }
 
 func parseRepoUrl(url string) (*repoUrl, error) {
@@ -29,7 +32,7 @@ func parseRepoUrl(url string) (*repoUrl, error) {
 		repo = s[0]
 		tag = s[1]
 	} else {
-		logrus.Infof("Using default tag: latest")
+		fmt.Printf("Using default tag: latest\n")
 		repo = s[0]
 		tag = "latest"
 	}
