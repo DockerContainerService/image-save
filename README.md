@@ -40,14 +40,15 @@ Usage:
   imsave [image] [flags]
 
 Flags:
-      --arch string     The architecture of the image you want to save (default "amd64")
-  -d, --debug           Enable debug mode
+      --arch string     the architecture of the image you want to save
+  -d, --debug           enable debug mode
   -h, --help            help for imsave
-  -i, --insecure        Whether the registry is using http
-      --os string       The osFilter of the image you want to save
-  -o, --output string   Output file
-  -p, --passwd string   Password of the registry
-  -u, --user string     Username of the registry
+  -i, --insecure        whether the registry is using http
+  -m, --mirror string   use a mirror repository
+      --os string       the osFilter of the image you want to save
+  -o, --output string   output file
+  -p, --passwd string   password of the registry
+  -u, --user string     username of the registry
   -v, --version         version for imsave
 ```
 ### Usage example
