@@ -10,11 +10,16 @@ import (
 	"github.com/containers/image/v5/manifest"
 	"github.com/containers/image/v5/pkg/blobinfocache/none"
 	"github.com/containers/image/v5/types"
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"io"
+	"os"
 	"strings"
+	"time"
 )
+
+const passwdEnv = "REGISTRY_PASSWORD"
 
 type Client struct {
 	sourceRef  types.ImageReference
@@ -25,15 +30,30 @@ type Client struct {
 	repo *repoUrl
 }
 
-func NewClient(sourceUrl, username, password string, insecure bool) *Client {
-	repo, err := parseRepoUrl(sourceUrl)
+func NewClient(sourceUrl, username, password, mirror string, insecure bool) *Client {
+	repo, err := parseRepoUrl(sourceUrl, mirror)
 	if err != nil {
-		logrus.Fatalf("parseRepoUrl error: %+v", err)
+		logrus.Fatalf("parse repo url[%s] error: %+v", sourceUrl, err)
 	}
-	srcRef, err := docker.ParseReference(fmt.Sprintf("//%s/%s:%s", repo.registry, strings.Join([]string{repo.namespace, repo.project}, "/"), repo.tag))
+	// If the password is empty, try to read it in the environment variable
+	if username != "" && password == "" {
+		if passwd, ok := os.LookupEnv(passwdEnv); ok {
+			password = passwd
+		}
+	}
+
+	repo.username = username
+	repo.password = password
+	repo.insecure = insecure
+
+	return &Client{repo: repo}
+}
+
+func (c *Client) initClient() {
+	srcRef, err := docker.ParseReference(fmt.Sprintf("//%s/%s:%s", c.repo.registry, strings.Join([]string{c.repo.namespace, c.repo.project}, "/"), c.repo.tag))
 
 	var sysContext *types.SystemContext
-	if insecure {
+	if c.repo.insecure {
 		sysContext = &types.SystemContext{
 			DockerInsecureSkipTLSVerify: types.OptionalBoolTrue,
 		}
@@ -41,11 +61,11 @@ func NewClient(sourceUrl, username, password string, insecure bool) *Client {
 		sysContext = &types.SystemContext{}
 	}
 
-	ctx := context.WithValue(context.Background(), ctxKey{"ImageSource"}, strings.Join([]string{repo.namespace, repo.project}, "/"))
-	if username != "" && password != "" {
+	ctx := context.WithValue(context.Background(), ctxKey{"ImageSource"}, strings.Join([]string{c.repo.namespace, c.repo.project}, "/"))
+	if c.repo.username != "" && c.repo.password != "" {
 		sysContext.DockerAuthConfig = &types.DockerAuthConfig{
-			Username: username,
-			Password: password,
+			Username: c.repo.username,
+			Password: c.repo.password,
 		}
 	}
 
@@ -54,13 +74,10 @@ func NewClient(sourceUrl, username, password string, insecure bool) *Client {
 		logrus.Fatalf("get image source error: %+v", err)
 	}
 
-	return &Client{
-		sourceRef:  srcRef,
-		source:     source,
-		ctx:        ctx,
-		sysContext: sysContext,
-		repo:       repo,
-	}
+	c.sourceRef = srcRef
+	c.source = source
+	c.ctx = ctx
+	c.sysContext = sysContext
 }
 
 func (c *Client) manifestHandler(manifestBytes []byte, manifestType string, osFilterList, archFilterList []string, parent *manifest.Schema2List) ([]manifest.Manifest, interface{}, error) {
@@ -76,7 +93,12 @@ func (c *Client) manifestHandler(manifestBytes []byte, manifestType string, osFi
 			if err != nil {
 				return nil, nil, err
 			}
-			defer blob.Close()
+			defer func(blob io.ReadCloser) {
+				err := blob.Close()
+				if err != nil {
+					logrus.Fatalf("close blob error: %+v", err)
+				}
+			}(blob)
 			bytes, err := io.ReadAll(blob)
 			if err != nil {
 				return nil, nil, err
@@ -145,7 +167,8 @@ func (c *Client) manifestHandler(manifestBytes []byte, manifestType string, osFi
 }
 
 func (c *Client) Save(osFilterList, archFilterList []string, output string) {
-	logrus.Infof("Using architecture: %s", strings.Join(archFilterList, ","))
+	c.initClient()
+	fmt.Printf("Using architecture: %s\n", strings.Join(archFilterList, ","))
 	manifestBytes, manifestType, err := c.source.GetManifest(c.ctx, nil)
 	if err != nil {
 		logrus.Fatalf("get manifest error: %+v", err)
@@ -170,7 +193,12 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 
 	// 开始导出
 	// 目录准备
-	destDir := fmt.Sprintf("%s_%s", strings.Join([]string{c.repo.namespace, c.repo.project}, "_"), c.repo.tag)
+	destDir := strings.ReplaceAll(c.repo.url, "/", "_")
+	if strings.Contains(destDir, ":") {
+		destDir = strings.ReplaceAll(destDir, ":", "_")
+	} else {
+		destDir += "_latest"
+	}
 
 	if output == "" {
 		output = fmt.Sprintf("%s.tgz", destDir)
@@ -212,7 +240,27 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 	parentId := ""
 	var layerDirId string
 
-	for index, layer := range manifestInfoList[0].LayerInfos() {
+	pw := progress.NewWriter()
+	pw.SetAutoStop(true)
+	pw.SetTrackerLength(25)
+	pw.SetMessageWidth(15)
+	pw.SetNumTrackersExpected(len(manifestInfoList[0].LayerInfos()))
+	pw.SetSortBy(progress.SortByPercentDsc)
+	pw.SetStyle(progress.StyleDefault)
+	pw.SetTrackerPosition(progress.PositionRight)
+	pw.SetUpdateFrequency(time.Millisecond * 100)
+	pw.Style().Colors = progress.StyleColorsExample
+	pw.Style().Options.PercentFormat = "%4.1f%%"
+	pw.Style().Visibility.ETA = true
+	pw.Style().Visibility.ETAOverall = false
+	pw.Style().Visibility.Speed = true
+	pw.Style().Visibility.SpeedOverall = false
+	pw.Style().Visibility.TrackerOverall = false
+	pw.Style().Visibility.Pinned = false
+
+	go pw.Render()
+
+	for _, layer := range manifestInfoList[0].LayerInfos() {
 		layerDigest := layer.Digest
 		logrus.Debugf("Digest: %s", layerDigest)
 		layerDirId = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s%s", parentId, layerDigest))))
@@ -224,7 +272,17 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 
 		logrus.Debugf("create layer.tar")
 		blob, size, err = c.source.GetBlob(c.ctx, types.BlobInfo{Digest: layerDigest, URLs: layer.URLs, Size: layer.Size}, none.NoCache)
-		tools.WriteBufferedFile(fmt.Sprintf("%s/layer.tar", layerDir), blob, size, fmt.Sprintf("[%d/%d] %s", index+1, len(manifestInfoList[0].LayerInfos()), string(layerDigest[7:19])))
+		tracker := progress.Tracker{
+			Message: fmt.Sprintf("[%s]", string(layerDigest[7:19])),
+			Total:   size,
+			Units:   progress.UnitsBytes,
+		}
+
+		pw.AppendTracker(&tracker)
+
+		go func() {
+			tools.WriteBufferedFile(fmt.Sprintf("%s/layer.tar", layerDir), blob, size, &tracker)
+		}()
 
 		manifestJson[0].Layers = append(manifestJson[0].Layers, fmt.Sprintf("%s/layer.tar", layerDirId))
 
@@ -254,6 +312,11 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 		}
 		tools.WriteFile(fmt.Sprintf("%s/json", layerDir), jsonObjByte)
 	}
+	time.Sleep(time.Second)
+
+	for pw.IsRenderInProgress() {
+		time.Sleep(time.Millisecond * 100)
+	}
 
 	logrus.Debugf("create manifest.json")
 	manifestByte, err := json.Marshal(manifestJson)
@@ -275,5 +338,5 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 		logrus.Fatalf("remove %s error: %+v", destDir, err)
 	}
 
-	logrus.Infof("Output file: %s", output)
+	fmt.Printf("Output file: %s\n", output)
 }

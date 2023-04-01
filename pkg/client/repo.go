@@ -2,7 +2,6 @@ package client
 
 import (
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"strings"
 )
 
@@ -13,9 +12,13 @@ type repoUrl struct {
 	namespace string
 	project   string
 	tag       string
+
+	username string
+	password string
+	insecure bool
 }
 
-func parseRepoUrl(url string) (*repoUrl, error) {
+func parseRepoUrl(url, mirror string) (*repoUrl, error) {
 	// split to registry/namespace/repoAndTag
 	slice := strings.SplitN(url, "/", 3)
 
@@ -29,7 +32,7 @@ func parseRepoUrl(url string) (*repoUrl, error) {
 		repo = s[0]
 		tag = s[1]
 	} else {
-		logrus.Infof("Using default tag: latest")
+		fmt.Printf("Using default tag: latest\n")
 		repo = s[0]
 		tag = "latest"
 	}
@@ -57,7 +60,7 @@ func parseRepoUrl(url string) (*repoUrl, error) {
 
 		return &repoUrl{
 			url:       url,
-			registry:  "registry.hub.docker.com",
+			registry:  mirror,
 			namespace: slice[0],
 			project:   repo,
 			tag:       tag,
@@ -65,7 +68,7 @@ func parseRepoUrl(url string) (*repoUrl, error) {
 	} else {
 		return &repoUrl{
 			url:       url,
-			registry:  "registry.hub.docker.com",
+			registry:  mirror,
 			namespace: "library",
 			project:   repo,
 			tag:       tag,

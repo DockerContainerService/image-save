@@ -1,5 +1,5 @@
 NAME = imsave
-VERSION = v1.0.0-release_build.0
+VERSION = v1.0.1-release_build.0
 
 OS = linux
 architecture = amd64 arm64

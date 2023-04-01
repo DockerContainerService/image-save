@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	version, os, arch, username, password, output string
-	debug, insecure                               bool
+	version, osFilter, archFilter, username, password, output, mirror string
+	debug, insecure                                                   bool
 )
 
 var rootCmd = &cobra.Command{
@@ -24,26 +24,30 @@ var rootCmd = &cobra.Command{
 			logrus.SetLevel(logrus.DebugLevel)
 		}
 
-		c := client.NewClient(args[0], username, password, insecure)
-		var osFilter []string
-		if os == "" {
-			osFilter = []string{}
+		c := client.NewClient(args[0], username, password, mirror, insecure)
+		var osFilters []string
+
+		// Avoid empty osFilter
+		if osFilter == "" {
+			osFilters = []string{}
 		} else {
-			osFilter = []string{os}
+			osFilters = []string{osFilter}
 		}
-		c.Save(osFilter, []string{arch}, output)
+
+		c.Save(osFilters, []string{archFilter}, output)
 	},
 }
 
 func init() {
 	rootCmd.SetVersionTemplate("imsave version {{.Version}}\n")
-	rootCmd.PersistentFlags().StringVar(&arch, "arch", runtime.GOARCH, "The architecture of the image you want to save")
-	rootCmd.PersistentFlags().StringVar(&os, "os", "", "The os of the image you want to save")
-	rootCmd.PersistentFlags().StringVarP(&output, "output", "o", "", "Output file")
-	rootCmd.PersistentFlags().StringVarP(&username, "user", "u", "", "Username of the registry")
-	rootCmd.PersistentFlags().StringVarP(&password, "passwd", "p", "", "Password of the registry")
-	rootCmd.PersistentFlags().BoolVarP(&insecure, "insecure", "i", false, "Whether the registry is using http")
-	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "Enable debug mode")
+	rootCmd.PersistentFlags().StringVar(&archFilter, "arch", runtime.GOARCH, "the architecture of the image you want to save")
+	rootCmd.PersistentFlags().StringVar(&osFilter, "os", "", "the osFilter of the image you want to save")
+	rootCmd.PersistentFlags().StringVarP(&output, "output", "o", "", "output file")
+	rootCmd.PersistentFlags().StringVarP(&username, "user", "u", "", "username of the registry")
+	rootCmd.PersistentFlags().StringVarP(&password, "passwd", "p", "", "password of the registry")
+	rootCmd.PersistentFlags().BoolVarP(&insecure, "insecure", "i", false, "whether the registry is using http")
+	rootCmd.PersistentFlags().StringVarP(&mirror, "mirror", "m", "registry.hub.docker.com", "use a mirror repository")
+	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "enable debug mode")
 }
 
 func Execute() {
