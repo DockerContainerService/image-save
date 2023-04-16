@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -258,6 +259,9 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 	pw.Style().Visibility.TrackerOverall = false
 	pw.Style().Visibility.Pinned = false
 
+	var wg sync.WaitGroup
+	wg.Add(len(manifestInfoList[0].LayerInfos()))
+
 	go pw.Render()
 
 	for _, layer := range manifestInfoList[0].LayerInfos() {
@@ -281,6 +285,7 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 		pw.AppendTracker(&tracker)
 
 		go func() {
+			defer wg.Done()
 			tools.WriteBufferedFile(fmt.Sprintf("%s/layer.tar", layerDir), blob, size, &tracker)
 		}()
 
@@ -313,6 +318,8 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 		tools.WriteFile(fmt.Sprintf("%s/json", layerDir), jsonObjByte)
 	}
 	time.Sleep(time.Second)
+
+	wg.Wait()
 
 	for pw.IsRenderInProgress() {
 		time.Sleep(time.Millisecond * 100)
