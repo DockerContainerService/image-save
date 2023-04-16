@@ -1,5 +1,5 @@
 NAME = imsave
-VERSION = v1.0.1-release_build.0
+VERSION ?= $(shell echo "v1.0.1-release_build.")$(shell git rev-parse --short HEAD)
 
 OS = linux
 architecture = amd64 arm64
