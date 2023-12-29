@@ -24,7 +24,10 @@ var rootCmd = &cobra.Command{
 			logrus.SetLevel(logrus.DebugLevel)
 		}
 
-		c := client.NewClient(args[0], username, password, mirror, insecure)
+		c, err := client.NewClient(args[0], username, password, mirror, insecure)
+		if err != nil {
+			logrus.Fatalf("%+v", err)
+		}
 		var osFilters []string
 
 		// Avoid empty osFilter
@@ -34,7 +37,10 @@ var rootCmd = &cobra.Command{
 			osFilters = []string{osFilter}
 		}
 
-		c.Save(osFilters, []string{archFilter}, output)
+		err = c.Save(osFilters, []string{archFilter}, output)
+		if err != nil {
+			logrus.Fatalf("%+v", err)
+		}
 	},
 }
 

@@ -31,10 +31,10 @@ type Client struct {
 	repo *repoUrl
 }
 
-func NewClient(sourceUrl, username, password, mirror string, insecure bool) *Client {
+func NewClient(sourceUrl, username, password, mirror string, insecure bool) (*Client, error) {
 	repo, err := parseRepoUrl(sourceUrl, mirror)
 	if err != nil {
-		logrus.Fatalf("parse repo url[%s] error: %+v", sourceUrl, err)
+		return nil, fmt.Errorf("parse repo url[%s] error: %+v", sourceUrl, err)
 	}
 	// If the password is empty, try to read it in the environment variable
 	if username != "" && password == "" {
@@ -47,12 +47,14 @@ func NewClient(sourceUrl, username, password, mirror string, insecure bool) *Cli
 	repo.password = password
 	repo.insecure = insecure
 
-	return &Client{repo: repo}
+	return &Client{repo: repo}, nil
 }
 
-func (c *Client) initClient() {
+func (c *Client) initClient() error {
 	srcRef, err := docker.ParseReference(fmt.Sprintf("//%s/%s:%s", c.repo.registry, strings.Join([]string{c.repo.namespace, c.repo.project}, "/"), c.repo.tag))
-
+	if err != nil {
+		return err
+	}
 	var sysContext *types.SystemContext
 	if c.repo.insecure {
 		sysContext = &types.SystemContext{
@@ -72,13 +74,14 @@ func (c *Client) initClient() {
 
 	source, err := srcRef.NewImageSource(ctx, sysContext)
 	if err != nil {
-		logrus.Fatalf("get image source error: %+v", err)
+		return fmt.Errorf("get image source error: %+v", err)
 	}
 
 	c.sourceRef = srcRef
 	c.source = source
 	c.ctx = ctx
 	c.sysContext = sysContext
+	return nil
 }
 
 func (c *Client) manifestHandler(manifestBytes []byte, manifestType string, osFilterList, archFilterList []string, parent *manifest.Schema2List) ([]manifest.Manifest, interface{}, error) {
@@ -94,11 +97,12 @@ func (c *Client) manifestHandler(manifestBytes []byte, manifestType string, osFi
 			if err != nil {
 				return nil, nil, err
 			}
-			defer func(blob io.ReadCloser) {
+			defer func(blob io.ReadCloser) error {
 				err := blob.Close()
 				if err != nil {
-					logrus.Fatalf("close blob error: %+v", err)
+					return fmt.Errorf("close blob error: %+v", err)
 				}
+				return nil
 			}(blob)
 			bytes, err := io.ReadAll(blob)
 			if err != nil {
@@ -167,29 +171,34 @@ func (c *Client) manifestHandler(manifestBytes []byte, manifestType string, osFi
 	return nil, nil, fmt.Errorf("unsupported manifest type: %v", manifestType)
 }
 
-func (c *Client) Save(osFilterList, archFilterList []string, output string) {
-	c.initClient()
+func (c *Client) Save(osFilterList, archFilterList []string, output string) error {
+	err := c.initClient()
+	if err != nil {
+		return err
+	}
 	fmt.Printf("Using architecture: %s\n", strings.Join(archFilterList, ","))
 	manifestBytes, manifestType, err := c.source.GetManifest(c.ctx, nil)
 	if err != nil {
-		logrus.Fatalf("get manifest error: %+v", err)
+		return fmt.Errorf("get manifest error: %+v", err)
 	}
 	manifestInfoList, _, err := c.manifestHandler(manifestBytes, manifestType, osFilterList, archFilterList, nil)
-
+	if err != nil {
+		return err
+	}
 	if len(manifestInfoList) == 0 {
-		logrus.Fatalf("%s: mismatch of os[%s] or architecture[%s]", c.repo.url, strings.Join(osFilterList, ","), strings.Join(archFilterList, ","))
+		return fmt.Errorf("%s: mismatch of os[%s] or architecture[%s]", c.repo.url, strings.Join(osFilterList, ","), strings.Join(archFilterList, ","))
 	} else if len(manifestInfoList) > 1 {
-		logrus.Fatalf("%s: matched of os[%s] and architecture[%s] greater than 1", c.repo.url, strings.Join(osFilterList, ","), strings.Join(archFilterList, ","))
+		return fmt.Errorf("%s: matched of os[%s] and architecture[%s] greater than 1", c.repo.url, strings.Join(osFilterList, ","), strings.Join(archFilterList, ","))
 	}
 
 	configInfo := manifestInfoList[0].ConfigInfo()
 	blob, size, err := c.source.GetBlob(c.ctx, types.BlobInfo{Digest: configInfo.Digest, URLs: configInfo.URLs, Size: configInfo.Size}, none.NoCache)
 	if err != nil {
-		logrus.Fatalf("load config info error: %+v", err)
+		return fmt.Errorf("load config info error: %+v", err)
 	}
 	configRes, err := io.ReadAll(blob)
 	if err != nil {
-		logrus.Fatalf("load config blob error: %+v", err)
+		return fmt.Errorf("load config blob error: %+v", err)
 	}
 
 	// 开始导出
@@ -208,7 +217,7 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 	if tools.IsPathExist(destDir) {
 		err = tools.RemovePath(destDir)
 		if err != nil {
-			logrus.Fatalf("target dir already exists: %s", destDir)
+			return fmt.Errorf("target dir already exists: %s", destDir)
 		}
 	}
 	tools.MkdirPath(destDir)
@@ -296,14 +305,14 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 		if manifestInfoList[0].LayerInfos()[len(manifestInfoList[0].LayerInfos())-1].Digest == layerDigest {
 			err = json.Unmarshal(configRes, &jsonObj)
 			if err != nil {
-				logrus.Fatalf("create json file error-1: %+v", err)
+				return fmt.Errorf("create json file error-1: %+v", err)
 			}
 			delete(jsonObj, "history")
 			delete(jsonObj, "rootfs")
 		} else {
 			err = json.Unmarshal([]byte(emptyJson), &jsonObj)
 			if err != nil {
-				logrus.Fatalf("create json file error-2: %+v", err)
+				return fmt.Errorf("create json file error-2: %+v", err)
 			}
 		}
 		jsonObj["id"] = layerDirId
@@ -313,7 +322,7 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 		parentId = layerDirId
 		jsonObjByte, err := json.Marshal(jsonObj)
 		if err != nil {
-			logrus.Fatalf("create json file error-3: %+v", err)
+			return fmt.Errorf("create json file error-3: %+v", err)
 		}
 		tools.WriteFile(fmt.Sprintf("%s/json", layerDir), jsonObjByte)
 	}
@@ -328,7 +337,7 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 	logrus.Debugf("create manifest.json")
 	manifestByte, err := json.Marshal(manifestJson)
 	if err != nil {
-		logrus.Fatalf("marshal manifestJson error: %+v", err)
+		return fmt.Errorf("marshal manifestJson error: %+v", err)
 	}
 	tools.WriteFile(fmt.Sprintf("%s/manifest.json", destDir), manifestByte)
 
@@ -342,8 +351,9 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) {
 	logrus.Debugf("remove tmp dir")
 	err = tools.RemovePath(destDir)
 	if err != nil {
-		logrus.Fatalf("remove %s error: %+v", destDir, err)
+		return fmt.Errorf("remove %s error: %+v", destDir, err)
 	}
 
 	fmt.Printf("Output file: %s\n", output)
+	return nil
 }

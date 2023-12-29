@@ -18,7 +18,7 @@ all: release release-windows ## Generate releases for all supported systems
 release: clean deps ## Generate releases for unix systems
 	@for arch in $(architecture);\
 	do \
-		for os in linux;\
+		for os in linux darwin;\
 		do \
 			echo "Building $$os-$$arch"; \
 			mkdir -p build; \
