@@ -11,6 +11,8 @@ import (
 	"github.com/containers/image/v5/pkg/blobinfocache/none"
 	"github.com/containers/image/v5/types"
 	"github.com/jedib0t/go-pretty/v6/progress"
+	"github.com/opencontainers/go-digest"
+	specsv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"io"
@@ -84,92 +86,255 @@ func (c *Client) initClient() error {
 	return nil
 }
 
-func (c *Client) manifestHandler(manifestBytes []byte, manifestType string, osFilterList, archFilterList []string, parent *manifest.Schema2List) ([]manifest.Manifest, interface{}, error) {
-	var manifestInfoList []manifest.Manifest
-	if manifestType == manifest.DockerV2Schema2MediaType {
-		manifestInfo, err := manifest.Schema2FromManifest(manifestBytes)
+type ManifestInfo struct {
+	Obj    manifest.Manifest
+	Digest *digest.Digest
+
+	Bytes []byte
+}
+
+func (c *Client) manifestHandler(manifestBytes []byte, manifestType string, osFilterList, archFilterList []string, parent *manifest.Schema2List) (interface{}, []byte, []*ManifestInfo, error) {
+	i := c.source
+	switch manifestType {
+	case manifest.DockerV2Schema2MediaType:
+		manifestObj, err := manifest.Schema2FromManifest(manifestBytes)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
-		if parent == nil && manifestInfo.ConfigInfo().Digest != "" {
-			blob, _, err := c.source.GetBlob(c.ctx, types.BlobInfo{Digest: manifestInfo.ConfigInfo().Digest, URLs: manifestInfo.ConfigInfo().URLs, Size: manifestInfo.ConfigInfo().Size}, none.NoCache)
+		// platform info stored in config blob
+		if parent == nil && manifestObj.ConfigInfo().Digest != "" {
+			blob, _, err := i.GetBlob(c.ctx, types.BlobInfo{Digest: manifestObj.ConfigInfo().Digest, URLs: manifestObj.ConfigInfo().URLs, Size: -1}, none.NoCache)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
-			defer func(blob io.ReadCloser) error {
-				err := blob.Close()
-				if err != nil {
-					return fmt.Errorf("close blob error: %+v", err)
-				}
-				return nil
-			}(blob)
+			defer blob.Close()
 			bytes, err := io.ReadAll(blob)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			results := gjson.GetManyBytes(bytes, "architecture", "os")
 
-			if !platformValidate(osFilterList, archFilterList, &manifest.Schema2PlatformSpec{
-				Architecture: results[0].String(),
-				OS:           results[1].String(),
-			}) {
-				return manifestInfoList, manifestInfo, nil
+			if !platformValidate(osFilterList, archFilterList,
+				&manifest.Schema2PlatformSpec{Architecture: results[0].String(), OS: results[1].String()}) {
+				return nil, nil, nil, nil
 			}
 		}
 
-		manifestInfoList = append(manifestInfoList, manifestInfo)
-		return manifestInfoList, nil, nil
-	} else if manifestType == manifest.DockerV2Schema1MediaType || manifestType == manifest.DockerV2Schema1SignedMediaType {
-		manifestInfo, err := manifest.Schema1FromManifest(manifestBytes)
+		return manifestObj, manifestBytes, nil, nil
+	case manifest.DockerV2Schema1MediaType, manifest.DockerV2Schema1SignedMediaType:
+		manifestObj, err := manifest.Schema1FromManifest(manifestBytes)
 		if err != nil {
-			return nil, nil, err
-		}
-		if parent == nil && !platformValidate(osFilterList, archFilterList, &manifest.Schema2PlatformSpec{
-			Architecture: manifestInfo.Architecture,
-		}) {
-			return manifestInfoList, manifestInfo, nil
-		}
-		manifestInfoList = append(manifestInfoList, manifestInfo)
-		return manifestInfoList, nil, nil
-	} else if manifestType == manifest.DockerV2ListMediaType {
-		manifestSchemaListInfo, err := manifest.Schema2ListFromManifest(manifestBytes)
-		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
-		var nm []manifest.Schema2ManifestDescriptor
+		// v1 only support architecture and this field is for information purposes and not currently used by the engine.
+		if parent == nil && !platformValidate(osFilterList, archFilterList,
+			&manifest.Schema2PlatformSpec{Architecture: manifestObj.Architecture}) {
+			return nil, nil, nil, nil
+		}
 
-		for _, manifestDescriptorElem := range manifestSchemaListInfo.Manifests {
+		return manifestObj, manifestBytes, nil, nil
+	case specsv1.MediaTypeImageManifest:
+		//TODO: platform filter?
+		manifestObj, err := manifest.OCI1FromManifest(manifestBytes)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return manifestObj, manifestBytes, nil, nil
+	case manifest.DockerV2ListMediaType:
+		var subManifestInfoSlice []*ManifestInfo
+
+		manifestSchemaListObj, err := manifest.Schema2ListFromManifest(manifestBytes)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		var filteredDescriptors []manifest.Schema2ManifestDescriptor
+
+		for index, manifestDescriptorElem := range manifestSchemaListObj.Manifests {
+			// select os and arch
 			if !platformValidate(osFilterList, archFilterList, &manifestDescriptorElem.Platform) {
 				continue
 			}
 
-			nm = append(nm, manifestDescriptorElem)
-
-			manifestByte, manifestType, err := c.source.GetManifest(c.ctx, &manifestDescriptorElem.Digest)
+			filteredDescriptors = append(filteredDescriptors, manifestDescriptorElem)
+			mfstBytes, mfstType, err := i.GetManifest(c.ctx, &manifestDescriptorElem.Digest)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 
-			platformSpecManifest, _, err := c.manifestHandler(manifestByte, manifestType, osFilterList, archFilterList, manifestSchemaListInfo)
+			subManifest, _, _, err := c.manifestHandler(mfstBytes, mfstType,
+				archFilterList, osFilterList, manifestSchemaListObj)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 
-			manifestInfoList = append(manifestInfoList, platformSpecManifest...)
+			if subManifest != nil {
+				subManifestInfoSlice = append(subManifestInfoSlice, &ManifestInfo{
+					Obj: subManifest.(manifest.Manifest),
+
+					Digest: &manifestSchemaListObj.Manifests[index].Digest,
+					Bytes:  mfstBytes,
+				})
+			}
 		}
 
-		if len(nm) != len(manifestSchemaListInfo.Manifests) {
-			manifestSchemaListInfo.Manifests = nm
-			return manifestInfoList, manifestSchemaListInfo, nil
+		if len(filteredDescriptors) == 0 {
+			return nil, nil, nil, nil
 		}
 
-		return manifestInfoList, nil, nil
+		if len(filteredDescriptors) != len(manifestSchemaListObj.Manifests) {
+			manifestSchemaListObj.Manifests = filteredDescriptors
+		}
+
+		newManifestBytes, _ := manifestSchemaListObj.Serialize()
+
+		return manifestSchemaListObj, newManifestBytes, subManifestInfoSlice, nil
+	case specsv1.MediaTypeImageIndex:
+		var subManifestInfoSlice []*ManifestInfo
+
+		ociIndexesObj, err := manifest.OCI1IndexFromManifest(manifestBytes)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		var filteredDescriptors []specsv1.Descriptor
+
+		for index, descriptor := range ociIndexesObj.Manifests {
+			// select os and arch
+			if !platformValidate(osFilterList, archFilterList, &manifest.Schema2PlatformSpec{
+				Architecture: descriptor.Platform.Architecture,
+				OS:           descriptor.Platform.OS,
+			}) {
+				continue
+			}
+
+			filteredDescriptors = append(filteredDescriptors, descriptor)
+
+			mfstBytes, mfstType, innerErr := i.GetManifest(c.ctx, &descriptor.Digest)
+			if innerErr != nil {
+				return nil, nil, nil, innerErr
+			}
+
+			subManifest, _, _, innerErr := c.manifestHandler(mfstBytes, mfstType,
+				archFilterList, osFilterList, nil)
+			if innerErr != nil {
+				return nil, nil, nil, err
+			}
+
+			if subManifest != nil {
+				subManifestInfoSlice = append(subManifestInfoSlice, &ManifestInfo{
+					Obj: subManifest.(manifest.Manifest),
+
+					Digest: &ociIndexesObj.Manifests[index].Digest,
+					Bytes:  mfstBytes,
+				})
+			}
+		}
+
+		if len(filteredDescriptors) == 0 {
+			return nil, nil, nil, nil
+		}
+
+		if len(filteredDescriptors) != len(ociIndexesObj.Manifests) {
+			ociIndexesObj.Manifests = filteredDescriptors
+		}
+
+		newManifestBytes, _ := ociIndexesObj.Serialize()
+
+		return ociIndexesObj, newManifestBytes, subManifestInfoSlice, nil
+	default:
+		return nil, nil, nil, fmt.Errorf("unsupported manifest type: %v", manifestType)
 	}
-
-	return nil, nil, fmt.Errorf("unsupported manifest type: %v", manifestType)
 }
+
+//func (c *Client) manifestHandler(manifestBytes []byte, manifestType string, osFilterList, archFilterList []string, parent *manifest.Schema2List) ([]manifest.Manifest, interface{}, error) {
+//	var manifestInfoList []manifest.Manifest
+//	if manifestType == manifest.DockerV2Schema2MediaType {
+//		manifestInfo, err := manifest.Schema2FromManifest(manifestBytes)
+//		if err != nil {
+//			return nil, nil, err
+//		}
+//
+//		if parent == nil && manifestInfo.ConfigInfo().Digest != "" {
+//			blob, _, err := c.source.GetBlob(c.ctx, types.BlobInfo{Digest: manifestInfo.ConfigInfo().Digest, URLs: manifestInfo.ConfigInfo().URLs, Size: manifestInfo.ConfigInfo().Size}, none.NoCache)
+//			if err != nil {
+//				return nil, nil, err
+//			}
+//			defer func(blob io.ReadCloser) error {
+//				err := blob.Close()
+//				if err != nil {
+//					return fmt.Errorf("close blob error: %+v", err)
+//				}
+//				return nil
+//			}(blob)
+//			bytes, err := io.ReadAll(blob)
+//			if err != nil {
+//				return nil, nil, err
+//			}
+//			results := gjson.GetManyBytes(bytes, "architecture", "os")
+//
+//			if !platformValidate(osFilterList, archFilterList, &manifest.Schema2PlatformSpec{
+//				Architecture: results[0].String(),
+//				OS:           results[1].String(),
+//			}) {
+//				return manifestInfoList, manifestInfo, nil
+//			}
+//		}
+//
+//		manifestInfoList = append(manifestInfoList, manifestInfo)
+//		return manifestInfoList, nil, nil
+//	} else if manifestType == manifest.DockerV2Schema1MediaType || manifestType == manifest.DockerV2Schema1SignedMediaType {
+//		manifestInfo, err := manifest.Schema1FromManifest(manifestBytes)
+//		if err != nil {
+//			return nil, nil, err
+//		}
+//		if parent == nil && !platformValidate(osFilterList, archFilterList, &manifest.Schema2PlatformSpec{
+//			Architecture: manifestInfo.Architecture,
+//		}) {
+//			return manifestInfoList, manifestInfo, nil
+//		}
+//		manifestInfoList = append(manifestInfoList, manifestInfo)
+//		return manifestInfoList, nil, nil
+//	} else if manifestType == manifest.DockerV2ListMediaType {
+//		manifestSchemaListInfo, err := manifest.Schema2ListFromManifest(manifestBytes)
+//		if err != nil {
+//			return nil, nil, err
+//		}
+//
+//		var nm []manifest.Schema2ManifestDescriptor
+//
+//		for _, manifestDescriptorElem := range manifestSchemaListInfo.Manifests {
+//			if !platformValidate(osFilterList, archFilterList, &manifestDescriptorElem.Platform) {
+//				continue
+//			}
+//
+//			nm = append(nm, manifestDescriptorElem)
+//
+//			manifestByte, manifestType, err := c.source.GetManifest(c.ctx, &manifestDescriptorElem.Digest)
+//			if err != nil {
+//				return nil, nil, err
+//			}
+//
+//			platformSpecManifest, _, err := c.manifestHandler(manifestByte, manifestType, osFilterList, archFilterList, manifestSchemaListInfo)
+//			if err != nil {
+//				return nil, nil, err
+//			}
+//
+//			manifestInfoList = append(manifestInfoList, platformSpecManifest...)
+//		}
+//
+//		if len(nm) != len(manifestSchemaListInfo.Manifests) {
+//			manifestSchemaListInfo.Manifests = nm
+//			return manifestInfoList, manifestSchemaListInfo, nil
+//		}
+//
+//		return manifestInfoList, nil, nil
+//	}
+//
+//	return nil, nil, fmt.Errorf("unsupported manifest type: %v", manifestType)
+//}
 
 func (c *Client) Save(osFilterList, archFilterList []string, output string) error {
 	err := c.initClient()
@@ -181,7 +346,7 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) erro
 	if err != nil {
 		return fmt.Errorf("get manifest error: %+v", err)
 	}
-	manifestInfoList, _, err := c.manifestHandler(manifestBytes, manifestType, osFilterList, archFilterList, nil)
+	_, _, manifestInfoList, err := c.manifestHandler(manifestBytes, manifestType, osFilterList, archFilterList, nil)
 	if err != nil {
 		return err
 	}
@@ -191,7 +356,7 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) erro
 		return fmt.Errorf("%s: matched of os[%s] and architecture[%s] greater than 1", c.repo.url, strings.Join(osFilterList, ","), strings.Join(archFilterList, ","))
 	}
 
-	configInfo := manifestInfoList[0].ConfigInfo()
+	configInfo := manifestInfoList[0].Obj.ConfigInfo()
 	blob, size, err := c.source.GetBlob(c.ctx, types.BlobInfo{Digest: configInfo.Digest, URLs: configInfo.URLs, Size: configInfo.Size}, none.NoCache)
 	if err != nil {
 		return fmt.Errorf("load config info error: %+v", err)
@@ -254,7 +419,7 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) erro
 	pw.SetAutoStop(true)
 	pw.SetTrackerLength(25)
 	pw.SetMessageWidth(15)
-	pw.SetNumTrackersExpected(len(manifestInfoList[0].LayerInfos()))
+	pw.SetNumTrackersExpected(len(manifestInfoList[0].Obj.LayerInfos()))
 	pw.SetSortBy(progress.SortByPercentDsc)
 	pw.SetStyle(progress.StyleDefault)
 	pw.SetTrackerPosition(progress.PositionRight)
@@ -269,11 +434,11 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) erro
 	pw.Style().Visibility.Pinned = false
 
 	var wg sync.WaitGroup
-	wg.Add(len(manifestInfoList[0].LayerInfos()))
+	wg.Add(len(manifestInfoList[0].Obj.LayerInfos()))
 
 	go pw.Render()
 
-	for _, layer := range manifestInfoList[0].LayerInfos() {
+	for _, layer := range manifestInfoList[0].Obj.LayerInfos() {
 		layerDigest := layer.Digest
 		logrus.Debugf("Digest: %s", layerDigest)
 		layerDirId = fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s%s", parentId, layerDigest))))
@@ -302,7 +467,7 @@ func (c *Client) Save(osFilterList, archFilterList []string, output string) erro
 
 		logrus.Debugf("create json file")
 		jsonObj := make(map[string]interface{})
-		if manifestInfoList[0].LayerInfos()[len(manifestInfoList[0].LayerInfos())-1].Digest == layerDigest {
+		if manifestInfoList[0].Obj.LayerInfos()[len(manifestInfoList[0].Obj.LayerInfos())-1].Digest == layerDigest {
 			err = json.Unmarshal(configRes, &jsonObj)
 			if err != nil {
 				return fmt.Errorf("create json file error-1: %+v", err)
